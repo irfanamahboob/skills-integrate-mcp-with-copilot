@@ -5,19 +5,36 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.middleware.sessions import SessionMiddleware
+from pydantic import BaseModel
 import os
+import json
 from pathlib import Path
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
 
+# Add session middleware
+app.add_middleware(SessionMiddleware, secret_key="your-secret-key-change-in-production")
+
 # Mount the static files directory
 current_dir = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=os.path.join(Path(__file__).parent,
           "static")), name="static")
+
+# Load teacher credentials
+def load_teachers():
+    with open(os.path.join(Path(__file__).parent, "teachers.json")) as f:
+        return json.load(f)
+
+
+# Pydantic model for login request
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 # In-memory activity database
 activities = {
@@ -83,14 +100,57 @@ def root():
     return RedirectResponse(url="/static/index.html")
 
 
+@app.post("/login")
+def login(credentials: LoginRequest, request: Request):
+    """Login endpoint for teachers"""
+    username = credentials.username
+    password = credentials.password
+    
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password required")
+    
+    teachers = load_teachers()
+    
+    # Check credentials
+    for teacher in teachers["teachers"]:
+        if teacher["username"] == username and teacher["password"] == password:
+            # Set session
+            request.session["username"] = username
+            return {"success": True, "username": username}
+    
+    raise HTTPException(status_code=401, detail="Invalid credentials")
+
+
+@app.post("/logout")
+def logout(request: Request):
+    """Logout endpoint for teachers"""
+    if "username" in request.session:
+        del request.session["username"]
+    return {"success": True, "message": "Logged out successfully"}
+
+
+@app.get("/user")
+def get_user(request: Request):
+    """Get current user session"""
+    user = request.session.get("username")
+    if user:
+        return {"username": user, "is_teacher": True}
+    return {"username": None, "is_teacher": False}
+
+
 @app.get("/activities")
 def get_activities():
     return activities
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(activity_name: str, email: str, request: Request):
     """Sign up a student for an activity"""
+    # Check if user is logged in as a teacher
+    user = request.session.get("username")
+    if not user:
+        raise HTTPException(status_code=403, detail="Only teachers can register students. Please log in.")
+    
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -111,8 +171,13 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(activity_name: str, email: str, request: Request):
     """Unregister a student from an activity"""
+    # Check if user is logged in as a teacher
+    user = request.session.get("username")
+    if not user:
+        raise HTTPException(status_code=403, detail="Only teachers can unregister students. Please log in.")
+    
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
